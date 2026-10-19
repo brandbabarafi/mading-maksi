@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="robots" content="noindex, nofollow" />
+    <meta name="theme-color" content="#faf7f2" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#141311" media="(prefers-color-scheme: dark)" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' blob: data:; connect-src 'self' https://*.workers.dev; object-src 'none'; base-uri 'none'"
+    />
+    <title>Mading Maksi</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" />
+    <link rel="stylesheet" href="style.css" />
+    <script type="module" src="app.js"></script>
+  </head>
+  <body>
+    <header class="kepala-app">
+      <a href="#/" class="merek"><span class="logo" id="logo"></span>Mading Maksi</a>
+      <div class="kepala-aksi">
+        <button type="button" id="tombol-bantuan" class="ikon-btn" aria-label="Cara pakai"></button>
+        <button type="button" id="chip-kode" class="chip-kode"></button>
+      </div>
+    </header>
+
+    <main id="app"><p class="sub">Memuat…</p></main>
+
+    <nav class="nav-bawah" id="nav" aria-label="Menu utama">
+      <a href="#/" data-ikon="rumah">Mading</a>
+      <a href="#/saldo" data-ikon="dompet">Saldo</a>
+      <a href="#/baru" class="nav-utama" data-ikon="tambah">Patungan</a>
+      <a href="#/anggota" data-ikon="orang">Anggota</a>
+    </nav>
+
+    <dialog id="sheet" class="sheet" aria-label="Panel"></dialog>
+  </body>
+</html>

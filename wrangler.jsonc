@@ -1,0 +1,29 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mading-maksi",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-06-01",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "mading-maksi",
+      // Ganti dengan id dari `npx wrangler d1 create mading-maksi` sebelum deploy.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vars": {
+    // Nama model bisa berubah; cek ai.google.dev dan console.groq.com/docs/models.
+    "GEMINI_MODEL": "gemini-3.8-flash",
+    "GROQ_MODEL": "openai/gpt-oss-120b",
+    "PEMBULATAN": "100",
+    // Domain GitHub Pages yang boleh memanggil API ini (tanpa garis miring di akhir).
+    "ALLOWED_ORIGINS": "https://brandbabarafi.github.io"
+  },
+  "observability": { "enabled": true }
+}

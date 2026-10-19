@@ -1,0 +1,6 @@
+# Salin jadi .dev.vars untuk server lokal (`npm run dev`). Di Cloudflare, isi lewat `npx wrangler secret put <NAMA>`.
+KODE_RUANGAN=ganti-dengan-kode-ruangan
+# Kunci gratis dari https://aistudio.google.com/apikey
+GEMINI_API_KEY=
+# Kunci gratis dari https://console.groq.com/keys (cadangan untuk teks)
+GROQ_API_KEY=
