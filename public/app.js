@@ -1,6 +1,9 @@
 import { hitung, BIAYA_BAWAAN } from './hitung.js';
-import { API_BASE } from './config.js';
+import { DATA_REPO, PEMBULATAN } from './config.js';
 import { ikon } from './ikon.js';
+import { gudangGitHub, gudangLokal } from './gudang.js';
+import { bukaKode, buatKode, kunciBaru, enkripsi, dekripsi, enkripsiJson, dekripsiJson, keB64, dariB64 } from './sandi.js';
+import { bacaPesanan } from './ai.js';
 
 const $app = document.getElementById('app');
 const $sheet = document.getElementById('sheet');
@@ -43,26 +46,146 @@ const simpan = {
   },
 };
 
-let kode = simpan.get('kode') ?? '';
+// ---------- Data di GitHub ----------
 
-async function api(path, { method = 'GET', body } = {}) {
-  const headers = {};
-  if (body !== undefined) headers['content-type'] = 'application/json';
-  if (kode) headers['x-kode-ruangan'] = encodeURIComponent(kode);
-  let r;
+const DEMO = !DATA_REPO || new URLSearchParams(location.search).has('demo');
+
+function bacaJsonAman(teks) {
   try {
-    r = await fetch(API_BASE + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+    return JSON.parse(teks) ?? {};
   } catch {
-    throw new Error('Tidak bisa terhubung ke server. Cek internet lalu coba lagi.');
+    return {};
   }
-  const data = await r.json().catch(() => ({}));
-  if (r.status === 401) {
-    kode = '';
-    simpan.set('kode', null);
-    renderKepala();
+}
+
+// Salinan terakhir untuk baca bersyarat (ETag) oleh pengunjung tanpa kode.
+const cachePublik = {
+  ...bacaJsonAman(simpan.get('cache')),
+  simpan(o) {
+    Object.assign(this, o);
+    simpan.set('cache', JSON.stringify({ etag: o.etag, sha: o.sha, data: o.data }));
+  },
+};
+
+const gudang = DEMO
+  ? gudangLokal({ getItem: (k) => simpan.get(k), setItem: (k, v) => simpan.set(k, v), removeItem: (k) => simpan.set(k, null) })
+  : gudangGitHub({ repo: DATA_REPO, cache: cachePublik });
+
+let kode = simpan.get('kode') ?? '';
+let akses = null; // { token, kunci, gemini, groq } hasil membuka kode
+
+async function aksesKode() {
+  if (!kode) return null;
+  akses ??= await bukaKode(kode);
+  return akses;
+}
+
+function lupakanKode(pesan) {
+  kode = '';
+  akses = null;
+  simpan.set('kode', null);
+  renderKepala();
+  if (pesan) toast(pesan);
+}
+
+let dataBasi = false;
+async function muat() {
+  let a = null;
+  try {
+    a = await aksesKode();
+  } catch {
+    lupakanKode('Kode ruangan di perangkat ini tidak valid lagi');
   }
-  if (!r.ok) throw new Error(data.error ?? `Gagal (${r.status})`);
-  return data;
+  try {
+    const h = await gudang.baca(a?.token);
+    dataBasi = Boolean(h?.basi);
+    return h?.data ?? null;
+  } catch (e) {
+    if (a && e.status === 401) {
+      lupakanKode('Token di kode ruangan sudah tidak berlaku. Minta kode baru ke admin.');
+      return muat();
+    }
+    throw e;
+  }
+}
+
+async function ubahData(mutasi, pesan) {
+  const a = await aksesKode();
+  if (!a) throw new Error('Masukkan kode ruangan dulu');
+  try {
+    return (await gudang.tulis(a.token, mutasi, pesan)).hasil;
+  } catch (e) {
+    if (e.status === 401) lupakanKode('Token di kode ruangan sudah tidak berlaku. Minta kode baru ke admin.');
+    throw e;
+  }
+}
+
+async function verifikasiKode(teks) {
+  let a;
+  try {
+    a = await bukaKode(teks);
+  } catch {
+    throw new Error('Kode ruangan tidak valid. Pastikan tersalin utuh.');
+  }
+  if (!(await gudang.cekAkses(a.token)).push) throw new Error('Token di kode ini tidak punya izin menulis data.');
+  const h = await gudang.baca(a.token);
+  if (!h) throw new Error('Data belum disiapkan. Admin perlu menjalankan Setup dulu.');
+  try {
+    await dekripsiJson(a.kunci, h.data.cek);
+  } catch {
+    throw new Error('Kode ini tidak cocok dengan data mading.');
+  }
+  return a;
+}
+
+const petaNama = (d) => new Map(d.anggota.map((a) => [a.id, a.nama]));
+const urutTerbaru = (a, b) => b.tanggal.localeCompare(a.tanggal) || (b.dibuat_pada ?? '').localeCompare(a.dibuat_pada ?? '');
+const jalurBukti = (pesertaId) => `bukti/${pesertaId}.bin`;
+const UMUR_BUKTI_MS = 14 * 24 * 60 * 60 * 1000;
+
+// Bentuk sesi untuk tampilan: nama orang sudah diisi.
+function rapikanSesi(d, s) {
+  const nm = petaNama(d);
+  return {
+    ...s,
+    penalang: nm.get(s.penalang_id) ?? '?',
+    peserta: s.peserta
+      .map((p) => ({ ...p, nama: nm.get(p.anggota_id) ?? '?', total_tagihan: p.total, ada_bukti: Boolean(p.bukti_pada), penalang: p.anggota_id === s.penalang_id }))
+      .sort((x, y) => x.nama.localeCompare(y.nama)),
+  };
+}
+
+function perbaruiStatus(s) {
+  if (s.status !== 'batal') s.status = s.peserta.every((p) => p.status_bayar === 'lunas') ? 'lunas' : 'terbuka';
+}
+
+function cariPeserta(d, sesiId, pesertaId) {
+  const s = d.sesi.find((x) => x.id === sesiId);
+  const p = s?.peserta.find((x) => x.id === pesertaId);
+  if (!s || !p) throw new Error('Patungan ini sudah berubah. Muat ulang mading.');
+  if (s.status === 'batal') throw new Error('Patungan ini sudah dibatalkan.');
+  if (p.anggota_id === s.penalang_id) throw new Error('Porsi yang nalangin selalu lunas.');
+  return { s, p };
+}
+
+// Lepas bukti yang lebih tua dari 14 hari; kembalikan file yang perlu dihapus.
+function bersihkanBukti(d) {
+  const batas = Date.now() - UMUR_BUKTI_MS;
+  const buang = [];
+  for (const s of d.sesi) {
+    for (const p of s.peserta) {
+      if (p.bukti_pada && Date.parse(p.bukti_pada) < batas) {
+        p.bukti_pada = null;
+        buang.push(jalurBukti(p.id));
+      }
+    }
+  }
+  return buang;
+}
+
+async function hapusFile(daftar) {
+  const a = await aksesKode();
+  for (const path of daftar) await gudang.hapusFile(a.token, path, 'Hapus bukti transfer').catch(() => {});
 }
 
 const WARNA = ['#d9480f', '#1971c2', '#2b8a3e', '#9c36b5', '#c2255c', '#0b7285', '#5f3dc4', '#495057'];
@@ -113,7 +236,7 @@ const kepalaSheet = (gambar, judul, sub) =>
 const PESAN_KODE = 'Kode dipakai untuk membuat patungan dan mencentang pembayaran. Minta ke admin ruangan. Cukup sekali, perangkat ini akan mengingatnya.';
 
 function formKode(lanjut) {
-  const input = el('input', { type: 'password', autocomplete: 'off', placeholder: 'Ketik kode ruangan', 'aria-label': 'Kode ruangan' });
+  const input = el('input', { type: 'password', autocomplete: 'off', placeholder: 'Tempel kode ruangan (MM1…)', 'aria-label': 'Kode ruangan' });
   const err = el('p.error', { role: 'alert' });
   const tombol = el('button.btn.utama', { type: 'submit' }, 'Buka');
   return el('form.tumpuk-kecil', {
@@ -122,20 +245,19 @@ function formKode(lanjut) {
       err.textContent = '';
       const nilai = input.value.trim();
       if (!nilai) {
-        err.textContent = 'Isi kode ruangan dulu';
+        err.textContent = 'Tempel kode ruangan dulu';
         input.focus();
         return;
       }
       tombol.disabled = true;
-      kode = nilai;
       try {
-        await api('/api/kode', { method: 'POST' });
+        akses = await verifikasiKode(nilai);
+        kode = nilai;
         simpan.set('kode', kode);
         renderKepala();
         toast('Kode tersimpan di perangkat ini');
         lanjut();
       } catch (x) {
-        kode = '';
         err.textContent = x.message;
         tombol.disabled = false;
       }
@@ -160,10 +282,7 @@ function sheetKodeAktif() {
     el('button.btn.penuh', {
       type: 'button',
       onclick: () => {
-        kode = '';
-        simpan.set('kode', null);
-        tutupSheet();
-        toast('Perangkat ini kembali ke mode lihat');
+        lupakanKode('Perangkat ini kembali ke mode lihat');
         render();
       },
     }, ikon('kunci'), 'Kunci perangkat ini'),
@@ -201,7 +320,9 @@ function sheetBantuan() {
     el('h3', {}, 'Kode ruangan'),
     el('p.sub', {}, 'Siapa pun yang punya link bisa melihat mading. Untuk membuat patungan atau mencentang pembayaran, perlu kode ruangan dari admin.'),
     el('h3', {}, 'Privasi'),
-    el('p.sub', {}, 'Yang tampil ke publik cuma nama panggilan dan nominal. Rincian menu dan bukti transfer hanya untuk yang punya kode, dan bukti terhapus otomatis setelah 14 hari.'),
+    el('p.sub', {}, 'Data disimpan di repo GitHub publik. Yang terbaca publik cuma nama panggilan, nama resto, dan nominal. Rincian menu dan bukti transfer dienkripsi, hanya bisa dibuka dengan kode, dan bukti terhapus otomatis setelah 14 hari.'),
+    el('h3', {}, 'Untuk admin'),
+    el('p.sub', {}, 'Menyiapkan mading pertama kali atau memperbarui kode ruangan: ', el('a', { href: '#/setup', onclick: tutupSheet }, 'buka Setup'), '.'),
     el('div.sheet-aksi', {}, el('span'), el('button.btn.utama', { type: 'button', onclick: tutupSheet }, 'Mengerti')),
   );
 }
@@ -233,7 +354,10 @@ const rute = [
   [/^#\/baru$/, perluKode(viewBaru, 'Buat patungan')],
   [/^#\/anggota$/, perluKode(viewAnggota, 'Kelola anggota')],
   [/^#\/sesi\/([\w-]+)$/, perluKode(viewSesi, 'Detail patungan')],
+  [/^#\/setup$/, viewSetup],
 ];
+
+const bannerDemo = () => el('p.peringatan', {}, 'Mode demo: data hanya tersimpan di browser ini, tidak di GitHub.');
 
 let giliran = 0;
 async function render() {
@@ -252,7 +376,7 @@ async function render() {
   const ini = ++giliran;
   try {
     const isi = await view(arg);
-    if (ini === giliran) $app.replaceChildren(isi);
+    if (ini === giliran) $app.replaceChildren(...(DEMO ? [bannerDemo()] : []), isi);
   } catch (e) {
     if (ini === giliran) {
       $app.replaceChildren(el('section.kartu.tumpuk-kecil', {}, el('p.error', {}, e.message), el('button.btn.kecil', { type: 'button', onclick: render }, 'Coba lagi')));
@@ -266,13 +390,31 @@ for (const a of document.querySelectorAll('#nav a')) a.prepend(ikon(a.dataset.ik
 document.getElementById('tombol-bantuan').addEventListener('click', sheetBantuan);
 document.getElementById('chip-kode').addEventListener('click', () => (kode ? sheetKodeAktif() : sheetKode(render)));
 window.addEventListener('hashchange', render);
+// Balik ke tab atau aplikasi: muat ulang mading/saldo supaya centang terbaru kelihatan.
+document.addEventListener('visibilitychange', () => {
+  const hash = location.hash || '#/';
+  if (document.visibilityState === 'visible' && !$sheet.open && /^#\/?$|^#\/saldo$/.test(hash)) render();
+});
 render();
+
+function kartuBelumSiap() {
+  return el('section.kartu.kosong', {},
+    el('div.ikon-besar', {}, ikon('mangkok')),
+    el('h2', {}, 'Mading belum disiapkan'),
+    el('p.sub', {}, 'Admin ruangan perlu menjalankan Setup sekali untuk menyiapkan tempat data di GitHub.'),
+    el('a.btn.utama', { href: '#/setup' }, 'Buka Setup'));
+}
 
 // ---------- Mading ----------
 
 async function viewMading() {
-  const { sesi, belum } = await api('/api/mading');
+  const d = await muat();
+  if (!d) return kartuBelumSiap();
+  const sesi = d.sesi.filter((s) => s.status !== 'batal').sort(urutTerbaru).map((s) => rapikanSesi(d, s));
+  const tagihan = sesi.filter((s) => s.status === 'terbuka').flatMap((s) => s.peserta.filter((p) => !p.penalang && p.status_bayar === 'belum'));
+  const belum = { jumlah: tagihan.reduce((a, p) => a + p.total, 0), tagihan: tagihan.length };
   const isi = el('div.tumpuk');
+  if (dataBasi) isi.append(el('p.catatan', {}, 'Data mungkin tertinggal beberapa menit karena GitHub sedang membatasi akses. Masukkan kode ruangan untuk melihat yang terbaru.'));
   if (!simpan.get('panduan_ok')) isi.append(kartuPanduan());
   isi.append(el('section.ringkas', {},
     el('div', {},
@@ -290,7 +432,7 @@ async function viewMading() {
     return isi;
   }
   const terbuka = sesi.filter((s) => s.status !== 'lunas');
-  const lunas = sesi.filter((s) => s.status === 'lunas');
+  const lunas = sesi.filter((s) => s.status === 'lunas').slice(0, 15);
   if (terbuka.length) isi.append(el('h2.judul-bagian', {}, 'Belum lunas'), ...terbuka.map(kartuSesi));
   if (lunas.length) isi.append(el('h2.judul-bagian', {}, 'Sudah lunas'), ...lunas.map(kartuLunas));
   return isi;
@@ -373,15 +515,32 @@ function sheetBayar(p, s) {
       kirim.disabled = true;
       err.textContent = '';
       try {
-        await api(`/api/peserta/${p.id}/lunas`, { method: 'POST', body: { lunas: true, bukti } });
+        const a = await aksesKode();
+        if (bukti) {
+          kirim.lastChild.textContent = 'Mengunggah bukti…';
+          const sandi = await enkripsi(a.kunci, dariB64(bukti.data));
+          await gudang.simpanFile(a.token, jalurBukti(p.id), keB64(sandi), `Bukti bayar ${p.nama} · ${s.resto}`);
+        }
+        kirim.lastChild.textContent = 'Menyimpan…';
+        const buang = await ubahData((d) => {
+          const { s: x, p: q } = cariPeserta(d, s.id, p.id);
+          const kini = new Date().toISOString();
+          q.status_bayar = 'lunas';
+          q.lunas_pada = kini;
+          if (bukti) q.bukti_pada = kini;
+          perbaruiStatus(x);
+          return bersihkanBukti(d);
+        }, `${p.nama} sudah bayar · ${s.resto}`);
+        await hapusFile(buang);
         toast(`${p.nama} sudah bayar`);
         render();
       } catch (x) {
         err.textContent = x.message;
+        kirim.lastChild.textContent = 'Sudah bayar';
         kirim.disabled = false;
       }
     },
-  }, ikon('cek'), 'Sudah bayar');
+  }, ikon('cek'), el('span', {}, 'Sudah bayar'));
 
   bukaSheet(
     kepalaSheet(avatar(p.nama), `${p.nama} sudah bayar?`, `${rp(p.total_tagihan)} ke ${s.penalang} · ${s.resto}`),
@@ -401,7 +560,16 @@ async function sheetSudahBayar(p, s) {
       if (!confirm(`Tandai ${p.nama} belum bayar? Bukti transfernya ikut terhapus.`)) return;
       batal.disabled = true;
       try {
-        await api(`/api/peserta/${p.id}/lunas`, { method: 'POST', body: { lunas: false } });
+        const buang = await ubahData((d) => {
+          const { s: x, p: q } = cariPeserta(d, s.id, p.id);
+          const lama = q.bukti_pada ? [jalurBukti(q.id)] : [];
+          q.status_bayar = 'belum';
+          q.lunas_pada = null;
+          q.bukti_pada = null;
+          perbaruiStatus(x);
+          return [...lama, ...bersihkanBukti(d)];
+        }, `${p.nama} ditandai belum bayar · ${s.resto}`);
+        await hapusFile(buang);
         toast(`${p.nama} ditandai belum bayar`);
         render();
       } catch (x) {
@@ -418,9 +586,16 @@ async function sheetSudahBayar(p, s) {
   );
   if (!p.ada_bukti) return;
   try {
-    const r = await fetch(`${API_BASE}/api/bukti/${p.id}`, { headers: { 'x-kode-ruangan': encodeURIComponent(kode) } });
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error ?? 'Bukti tidak bisa dimuat');
-    tempat.replaceChildren(el('img', { src: URL.createObjectURL(await r.blob()), alt: `Bukti transfer ${p.nama}` }));
+    const a = await aksesKode();
+    const sandi = await gudang.ambilFile(a.token, jalurBukti(p.id));
+    if (!sandi) throw new Error('Bukti sudah terhapus.');
+    let foto;
+    try {
+      foto = await dekripsi(a.kunci, sandi);
+    } catch {
+      throw new Error('Bukti tidak bisa dibuka dengan kode ini.');
+    }
+    tempat.replaceChildren(el('img', { src: URL.createObjectURL(new Blob([foto], { type: 'image/jpeg' })), alt: `Bukti transfer ${p.nama}` }));
   } catch (x) {
     tempat.replaceChildren(el('p.error', {}, x.message));
   }
@@ -429,25 +604,42 @@ async function sheetSudahBayar(p, s) {
 // ---------- Saldo ----------
 
 async function viewSaldo() {
-  const [{ anggota }, { utang }] = await Promise.all([api('/api/anggota'), api('/api/saldo')]);
+  const d = await muat();
+  if (!d) return kartuBelumSiap();
+  const nm = petaNama(d);
+  const anggota = [...d.anggota].sort((a, b) => a.nama.localeCompare(b.nama));
+  const peta = new Map();
+  for (const s of d.sesi) {
+    if (s.status !== 'terbuka') continue;
+    for (const p of s.peserta) {
+      if (p.status_bayar !== 'belum' || p.anggota_id === s.penalang_id) continue;
+      const k = `${p.anggota_id}>${s.penalang_id}`;
+      peta.set(k, (peta.get(k) ?? 0) + p.total);
+    }
+  }
+  const utang = [...peta].map(([k, jumlah]) => {
+    const [dari, ke] = k.split('>');
+    return { dari: nm.get(dari), ke: nm.get(ke), jumlah };
+  });
+
   let saya = simpan.get('saya') ?? '';
   const chips = el('div.chips', { role: 'radiogroup', 'aria-label': 'Kamu siapa?' });
   const hasil = el('div.tumpuk');
 
   function gambarChips() {
     chips.replaceChildren(...anggota
-      .filter((a) => a.aktif || a.nama_panggilan === saya)
+      .filter((a) => a.aktif || a.nama === saya)
       .map((a) => el('button.chip', {
         type: 'button',
         role: 'radio',
-        'aria-checked': String(a.nama_panggilan === saya),
+        'aria-checked': String(a.nama === saya),
         onclick: () => {
-          saya = a.nama_panggilan;
+          saya = a.nama;
           simpan.set('saya', saya);
           gambarChips();
           tampil();
         },
-      }, avatar(a.nama_panggilan, true), a.nama_panggilan)));
+      }, avatar(a.nama, true), a.nama)));
   }
 
   function tampil() {
@@ -486,7 +678,23 @@ async function viewSaldo() {
 // ---------- Detail patungan ----------
 
 async function viewSesi(id) {
-  const s = await api(`/api/sesi/${id}`);
+  const d = await muat();
+  if (!d) return kartuBelumSiap();
+  const mentah = d.sesi.find((x) => x.id === id);
+  if (!mentah) throw new Error('Patungan tidak ditemukan.');
+  const nm = petaNama(d);
+  const a = await aksesKode();
+  let rahasia;
+  try {
+    rahasia = await dekripsiJson(a.kunci, mentah.rahasia);
+  } catch {
+    throw new Error('Rincian patungan ini tidak bisa dibuka dengan kode di perangkat ini.');
+  }
+  const s = {
+    ...rapikanSesi(d, mentah),
+    biaya: rahasia.biaya,
+    items: rahasia.items.map((it) => ({ ...it, pemakan: Object.keys(it.porsi).map((idAnggota) => ({ nama: nm.get(idAnggota) ?? '?' })) })),
+  };
   const batal = s.status === 'batal';
   const utang = s.peserta.filter((p) => !p.penalang);
   return el('div.tumpuk', {},
@@ -520,7 +728,11 @@ async function viewSesi(id) {
           onclick: async () => {
             if (!confirm('Batalkan patungan ini? Tagihannya hilang dari mading, riwayatnya tetap tersimpan.')) return;
             try {
-              await api(`/api/sesi/${id}/batal`, { method: 'POST' });
+              await ubahData((data) => {
+                const x = data.sesi.find((y) => y.id === id);
+                if (!x) throw new Error('Patungan tidak ditemukan.');
+                x.status = 'batal';
+              }, `Batalkan patungan ${s.resto}`);
               toast('Patungan dibatalkan');
               location.hash = '#/';
             } catch (x) {
@@ -533,7 +745,9 @@ async function viewSesi(id) {
 // ---------- Anggota ----------
 
 async function viewAnggota() {
-  const { anggota } = await api('/api/anggota');
+  const d = await muat();
+  if (!d) return kartuBelumSiap();
+  const anggota = [...d.anggota].sort((a, b) => a.nama.localeCompare(b.nama));
   const input = el('input', { placeholder: 'Nama panggilan, misal Sari', maxlength: 30, 'aria-label': 'Nama panggilan' });
   const err = el('p.error', { role: 'alert' });
   return el('div.tumpuk', {},
@@ -544,10 +758,14 @@ async function viewAnggota() {
         onsubmit: async (e) => {
           e.preventDefault();
           err.textContent = '';
-          if (!input.value.trim()) return void (err.textContent = 'Isi nama panggilan dulu');
+          const nama = input.value.trim();
+          if (!nama) return void (err.textContent = 'Isi nama panggilan dulu');
           try {
-            await api('/api/anggota', { method: 'POST', body: { nama_panggilan: input.value } });
-            toast(`${input.value.trim()} ditambahkan`);
+            await ubahData((data) => {
+              if (data.anggota.some((x) => x.nama.toLowerCase() === nama.toLowerCase())) throw new Error(`"${nama}" sudah ada`);
+              data.anggota.push({ id: crypto.randomUUID().slice(0, 8), nama, aktif: true });
+            }, `Tambah anggota ${nama}`);
+            toast(`${nama} ditambahkan`);
             render();
           } catch (x) {
             err.textContent = x.message;
@@ -558,13 +776,16 @@ async function viewAnggota() {
     el('section.kartu', {},
       anggota.length
         ? anggota.map((a) => el('div.baris', { class: a.aktif ? null : 'redup' },
-            avatar(a.nama_panggilan),
-            el('div.isi', {}, el('b', {}, a.nama_panggilan), a.aktif ? null : el('p.sub', {}, 'Nonaktif, tidak muncul di pilihan')),
+            avatar(a.nama),
+            el('div.isi', {}, el('b', {}, a.nama), a.aktif ? null : el('p.sub', {}, 'Nonaktif, tidak muncul di pilihan')),
             el('button.btn.kecil', {
               type: 'button',
               onclick: async () => {
                 try {
-                  await api(`/api/anggota/${a.id}`, { method: 'PATCH', body: { aktif: !a.aktif } });
+                  await ubahData((data) => {
+                    const x = data.anggota.find((y) => y.id === a.id);
+                    if (x) x.aktif = !a.aktif;
+                  }, `${a.aktif ? 'Nonaktifkan' : 'Aktifkan'} ${a.nama}`);
                   render();
                 } catch (x) {
                   alert(x.message);
@@ -582,8 +803,10 @@ const BIAYA_UTAMA = new Set(['Ongkir', 'Biaya layanan', 'Promo makanan']);
 const NAMA_LANGKAH = ['Pesanan', 'Biaya', 'Cek'];
 
 async function viewBaru() {
-  const { anggota, pembulatan } = await api('/api/anggota');
-  const aktif = anggota.filter((a) => a.aktif);
+  const d = await muat();
+  if (!d) return kartuBelumSiap();
+  const pembulatan = PEMBULATAN;
+  const aktif = d.anggota.filter((a) => a.aktif).sort((a, b) => a.nama.localeCompare(b.nama));
   if (!aktif.length) {
     return el('section.kartu.kosong', {},
       el('div.ikon-besar', {}, ikon('orang')),
@@ -592,7 +815,7 @@ async function viewBaru() {
       el('a.btn.utama', { href: '#/anggota' }, ikon('tambah'), 'Tambah anggota'));
   }
 
-  const tersimpan = Number(simpan.get('penalang'));
+  const tersimpan = simpan.get('penalang');
   const st = {
     resto: '',
     tanggal: hariIni(),
@@ -605,7 +828,7 @@ async function viewBaru() {
   };
   let langkah = 1;
 
-  const namaDari = (id) => aktif.find((a) => String(a.id) === String(id))?.nama_panggilan ?? '?';
+  const namaDari = (id) => aktif.find((a) => a.id === id)?.nama ?? '?';
   const itemsSiap = () =>
     st.items
       .filter((it) => it.nama_item.trim() || it.harga_satuan)
@@ -675,16 +898,32 @@ async function viewBaru() {
     errLangkah.textContent = '';
     tombolPasang.disabled = true;
     try {
-      await api('/api/sesi', {
-        method: 'POST',
-        body: {
-          resto: st.resto,
-          tanggal: st.tanggal,
-          penalang_id: st.penalang_id,
-          items: itemsSiap().map(({ nama_item, harga_satuan, qty, sumber, porsi }) => ({ nama_item, harga_satuan, qty, sumber, porsi })),
-          biaya: st.biaya.filter((b) => b.nominal > 0).map(({ nama_biaya, nominal, cara_bagi, potongan }) => ({ nama_biaya, nominal, cara_bagi, potongan })),
-        },
-      });
+      const items = itemsSiap().map(({ nama_item, harga_satuan, qty, sumber, porsi }) => ({ nama_item, harga_satuan, qty, sumber, porsi }));
+      const biaya = st.biaya.filter((b) => b.nominal > 0).map(({ nama_biaya, nominal, cara_bagi, potongan }) => ({ nama_biaya, nominal, cara_bagi, potongan }));
+      const h = hitung({ items, biaya, pembulatan });
+      const kini = new Date().toISOString();
+      const sesi = {
+        id: crypto.randomUUID(),
+        resto: st.resto.trim(),
+        tanggal: st.tanggal,
+        penalang_id: st.penalang_id,
+        status: 'terbuka',
+        dibuat_pada: kini,
+        peserta: h.peserta.map((p) => {
+          const nalangin = p.anggota_id === st.penalang_id;
+          return { id: crypto.randomUUID(), anggota_id: p.anggota_id, total: p.total, status_bayar: nalangin ? 'lunas' : 'belum', lunas_pada: nalangin ? kini : null, bukti_pada: null };
+        }),
+        // Rincian menu dan biaya hanya bisa dibaca pemegang kode.
+        rahasia: await enkripsiJson((await aksesKode()).kunci, { items, biaya }),
+      };
+      perbaruiStatus(sesi);
+      await ubahData((data) => {
+        const aktifSekarang = new Set(data.anggota.filter((x) => x.aktif).map((x) => x.id));
+        if (![sesi.penalang_id, ...sesi.peserta.map((p) => p.anggota_id)].every((x) => aktifSekarang.has(x))) {
+          throw new Error('Ada anggota yang baru saja dinonaktifkan. Muat ulang lalu coba lagi.');
+        }
+        data.sesi.push(sesi);
+      }, `Patungan ${sesi.resto} (${sesi.tanggal})`);
       simpan.set('penalang', st.penalang_id);
       toast('Patungan dipasang di mading');
       location.hash = '#/';
@@ -705,7 +944,7 @@ async function viewBaru() {
           st.penalang_id = a.id;
           gambarChip();
         },
-      }, avatar(a.nama_panggilan, true), a.nama_panggilan)));
+      }, avatar(a.nama, true), a.nama)));
     gambarChip();
     return wrap;
   }
@@ -754,7 +993,7 @@ async function viewBaru() {
               e.currentTarget.setAttribute('aria-pressed', String(it.porsi.has(a.id)));
               gambarFooter();
             },
-          }, avatar(a.nama_panggilan, true), a.nama_panggilan)),
+          }, avatar(a.nama, true), a.nama)),
           aktif.length > 1
             ? el('button.chip.teks', {
                 type: 'button',
@@ -801,7 +1040,15 @@ async function viewBaru() {
       tombolAI.disabled = true;
       try {
         const gambarStruk = foto ? await kecilkan(foto, 1600, 0.85) : null;
-        const r = await api('/api/ai/baca', { method: 'POST', body: { teks: st.teksAI, gambar: gambarStruk, penalang: namaDari(st.penalang_id) } });
+        const a = await aksesKode();
+        const r = await bacaPesanan({
+          teks: st.teksAI.slice(0, 4000),
+          gambar: gambarStruk,
+          anggota: aktif.map((x) => x.nama),
+          penalang: namaDari(st.penalang_id),
+          kunciGemini: a.gemini,
+          kunciGroq: a.groq,
+        });
         terapkanAI(r);
         gambarItems();
         gambarFooter();
@@ -840,7 +1087,7 @@ async function viewBaru() {
   }
 
   function terapkanAI(r) {
-    const cari = (n) => aktif.find((a) => a.nama_panggilan.toLowerCase() === String(n).trim().toLowerCase())?.id;
+    const cari = (n) => aktif.find((a) => a.nama.toLowerCase() === String(n).trim().toLowerCase())?.id;
     if (r.items.length) {
       st.items = r.items.map((it) => itemBaru({
         nama_item: it.nama_item,
@@ -954,4 +1201,110 @@ async function viewBaru() {
 
   gambar();
   return el('div', {}, wadah, footer);
+}
+
+// ---------- Setup (admin, sekali) ----------
+
+async function viewSetup() {
+  const isian = (placeholder, label) => el('input', { type: 'password', autocomplete: 'off', placeholder, 'aria-label': label });
+  const token = isian('github_pat_…', 'Token GitHub');
+  const gemini = isian('Opsional, AIza…', 'Kunci Gemini');
+  const groq = isian('Opsional, gsk_…', 'Kunci Groq');
+  const kodeLama = isian('Hanya kalau memperbarui kode, MM1…', 'Kode lama');
+  const err = el('p.error', { role: 'alert' });
+  const hasil = el('div.tumpuk');
+  const tombol = el('button.btn.utama.penuh', { type: 'submit' }, 'Buat kode ruangan');
+  const tautan = (teks, href) => el('a', { href, target: '_blank', rel: 'noopener' }, teks);
+  const namaRepo = DATA_REPO.split('/')[1] ?? 'mading-maksi-data';
+
+  async function kirim(e) {
+    e.preventDefault();
+    err.textContent = '';
+    hasil.replaceChildren();
+    const t = token.value.trim();
+    if (!t) return void (err.textContent = 'Tempel token GitHub dulu');
+    tombol.disabled = true;
+    tombol.textContent = 'Memeriksa…';
+    try {
+      if (!(await gudang.cekAkses(t)).push) throw new Error(`Token belum punya izin "Contents: Read and write" untuk repo ${DATA_REPO}.`);
+      const ada = await gudang.baca(t);
+      let kunciB64;
+      if (ada) {
+        if (!kodeLama.value.trim()) throw new Error('Data sudah ada. Tempel kode lama supaya kunci enkripsinya sama dan data lama tetap terbaca.');
+        let lama;
+        try {
+          lama = await bukaKode(kodeLama.value);
+          await dekripsiJson(lama.kunci, ada.data.cek);
+        } catch {
+          throw new Error('Kode lama tidak valid atau tidak cocok dengan data yang ada.');
+        }
+        kunciB64 = lama.kunciB64;
+      } else {
+        kunciB64 = kunciBaru();
+        const { kunci } = await bukaKode(buatKode({ token: t, kunciB64 }));
+        await gudang.buatAwal(t, { versi: 1, cek: await enkripsiJson(kunci, 'mading-maksi'), anggota: [], sesi: [] });
+      }
+      tampilkanKode(buatKode({ token: t, kunciB64, gemini: gemini.value.trim(), groq: groq.value.trim() }), !ada);
+    } catch (x) {
+      err.textContent = x.message;
+    } finally {
+      tombol.disabled = false;
+      tombol.textContent = 'Buat kode ruangan';
+    }
+  }
+
+  function tampilkanKode(kodeBaru, baru) {
+    const kotak = el('textarea', { readonly: true, rows: 4, 'aria-label': 'Kode ruangan', value: kodeBaru });
+    hasil.replaceChildren(el('section.kartu.panduan.tumpuk-kecil', {},
+      el('h2', {}, baru ? 'Mading siap dipakai' : 'Kode baru siap'),
+      el('p.sub', {}, 'Salin kode ini dan bagikan ke anggota ruangan saja. Siapa pun yang punya kode bisa mengubah data mading.'),
+      kotak,
+      el('div.sejajar', {},
+        el('button.btn', {
+          type: 'button',
+          onclick: async (e) => {
+            const b = e.currentTarget;
+            try {
+              await navigator.clipboard.writeText(kodeBaru);
+              b.textContent = 'Tersalin';
+            } catch {
+              kotak.select();
+            }
+          },
+        }, 'Salin kode'),
+        el('button.btn.utama', {
+          type: 'button',
+          onclick: () => {
+            kode = kodeBaru;
+            akses = null;
+            simpan.set('kode', kodeBaru);
+            renderKepala();
+            location.hash = '#/anggota';
+          },
+        }, 'Pakai di perangkat ini'))));
+    hasil.scrollIntoView({ behavior: 'smooth' });
+  }
+
+  const langkah = (no, judul, ...isi) => el('li', {}, el('span.nomor', {}, String(no)), el('div', {}, el('b', {}, judul), el('p.sub', {}, ...isi)));
+  return el('div.tumpuk', {},
+    el('section.kartu.tumpuk-kecil', {},
+      el('h2', {}, 'Setup Mading Maksi'),
+      el('p.sub', {}, 'Cukup sekali oleh admin ruangan. Hasilnya satu kode ruangan untuk dibagikan ke anggota.'),
+      el('ol.langkah', {},
+        langkah(1, 'Buat repo data', 'Repo publik kosong bernama ', el('b', {}, namaRepo), '. ',
+          tautan('Buat di GitHub', `https://github.com/new?name=${encodeURIComponent(namaRepo)}&visibility=public&description=Data%20Mading%20Maksi`)),
+        langkah(2, 'Buat token GitHub', 'Pilih fine-grained token. Repository access: Only select repositories → ', el('b', {}, namaRepo),
+          '. Permissions: Contents → Read and write. Masa berlaku paling lama 1 tahun. ',
+          tautan('Buat token', 'https://github.com/settings/personal-access-tokens/new')),
+        langkah(3, 'Kunci AI (opsional)', 'Kunci gratis supaya AI bisa membaca struk dan chat pesanan. ',
+          tautan('Ambil kunci Gemini', 'https://aistudio.google.com/apikey')))),
+    el('form.kartu.tumpuk-kecil', { onsubmit: kirim },
+      el('label.field', {}, 'Token GitHub', token),
+      el('label.field', {}, 'Kunci Gemini', gemini),
+      el('label.field', {}, 'Kunci Groq (cadangan, opsional)', groq),
+      el('label.field', {}, 'Kode lama', kodeLama),
+      el('p.catatan', {}, 'Token dan kunci hanya dikirim ke GitHub dan layanan AI, lalu disimpan di dalam kode ruangan.'),
+      err,
+      tombol),
+    hasil);
 }
