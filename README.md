@@ -24,11 +24,11 @@ Melihat mading dan saldo tidak perlu apa-apa. Membuat patungan, mencentang, dan 
 1. **GitHub Pages:** di repo ini, buka **Settings → Pages → Source: GitHub Actions**, lalu jalankan ulang workflow **Publish ke GitHub Pages** di tab Actions.
 2. Buka mading, ketuk **?** → **buka Setup** (atau langsung `…/mading-maksi/#/setup`), lalu ikuti 3 langkah di sana:
    - Buat repo publik kosong **`mading-maksi-data`**.
-   - Buat **fine-grained token** di https://github.com/settings/personal-access-tokens/new. Repository access: hanya `mading-maksi-data`. Permissions: **Contents → Read and write**. Masa berlaku paling lama 1 tahun.
+   - Buat **fine-grained token** di https://github.com/settings/personal-access-tokens/new. Repository access: hanya `mading-maksi-data`. Permissions: **Contents → Read and write**. Expiration: "No expiration" boleh (tidak perlu diperbarui), asal token segera dicabut kalau kode bocor; lebih aman pilih 1 tahun.
    - (Opsional) kunci Gemini gratis dari https://aistudio.google.com/apikey.
 3. Tempel token dan kunci, tekan **Buat kode ruangan**. Bagikan kode itu ke anggota ruangan saja.
 
-Token kedaluwarsa atau mau ganti kode? Buka Setup lagi, isi token baru, dan tempel **kode lama** di kolom "Kode lama" supaya kunci enkripsinya tetap sama dan data lama tetap terbaca.
+Token kedaluwarsa, bocor, atau mau ganti kode? Buka Setup lagi, isi token baru, dan tempel **kode lama** di kolom "Kode lama" supaya kunci enkripsinya tetap sama dan data lama tetap terbaca.
 
 ## Jalankan di komputer sendiri
 
@@ -64,7 +64,7 @@ Di `public/config.js`:
 
 ## Batasan yang perlu diketahui
 
-- **Kode ruangan = kunci rumah.** Isinya token GitHub-mu (hanya bisa menulis ke repo data) dan kunci enkripsi. Bagikan hanya ke anggota. Kalau bocor, buat token baru, cabut token lama di GitHub, lalu buat ulang kode lewat Setup.
+- **Kode ruangan = kunci rumah.** Isinya token GitHub-mu (hanya bisa menulis ke repo data) dan kunci enkripsi. Token tanpa kedaluwarsa tetap berlaku sampai dicabut di https://github.com/settings/personal-access-tokens. Bagikan hanya ke anggota. Kalau bocor, buat token baru, cabut token lama di GitHub, lalu buat ulang kode lewat Setup.
 - **Pengunjung tanpa kode** membaca lewat API GitHub tanpa login (batas 60 permintaan per jam per jaringan, tapi permintaan "tidak berubah" tidak dihitung). Kalau batasnya habis, data diambil dari salinan GitHub yang bisa tertinggal sampai 5 menit.
 - **Foto bukti** dihapus dari repo setelah 14 hari atau saat centang dibatalkan. Riwayat git tetap menyimpan versi terenkripsinya, yang hanya bisa dibuka dengan kode ruangan.
 - **Kunci AI** ada di dalam kode ruangan, jadi siapa pun yang memegang kode bisa melihatnya. Pakai kunci tier gratis.

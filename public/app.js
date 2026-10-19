@@ -385,8 +385,7 @@ async function render() {
 }
 
 document.getElementById('logo').append(ikon('mangkok'));
-document.getElementById('tombol-bantuan').append(ikon('bantuan'));
-for (const a of document.querySelectorAll('#nav a')) a.prepend(ikon(a.dataset.ikon));
+for (const a of document.querySelectorAll('#nav [data-ikon]')) a.prepend(ikon(a.dataset.ikon));
 document.getElementById('tombol-bantuan').addEventListener('click', sheetBantuan);
 document.getElementById('chip-kode').addEventListener('click', () => (kode ? sheetKodeAktif() : sheetKode(render)));
 window.addEventListener('hashchange', render);
@@ -1294,7 +1293,7 @@ async function viewSetup() {
         langkah(1, 'Buat repo data', 'Repo publik kosong bernama ', el('b', {}, namaRepo), '. ',
           tautan('Buat di GitHub', `https://github.com/new?name=${encodeURIComponent(namaRepo)}&visibility=public&description=Data%20Mading%20Maksi`)),
         langkah(2, 'Buat token GitHub', 'Pilih fine-grained token. Repository access: Only select repositories → ', el('b', {}, namaRepo),
-          '. Permissions: Contents → Read and write. Masa berlaku paling lama 1 tahun. ',
+          '. Permissions: Contents → Read and write. Expiration: "No expiration" boleh, asal token dicabut kalau kode bocor; lebih aman pilih 1 tahun. ',
           tautan('Buat token', 'https://github.com/settings/personal-access-tokens/new')),
         langkah(3, 'Kunci AI (opsional)', 'Kunci gratis supaya AI bisa membaca struk dan chat pesanan. ',
           tautan('Ambil kunci Gemini', 'https://aistudio.google.com/apikey')))),
